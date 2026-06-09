@@ -48,7 +48,7 @@ jobs:
 
             - name: Build release artifacts
               shell: cmd
-              run: .\deploy.bat
+              run: .\scripts\deploy.bat
 
             - name: Verify release artifacts
               shell: powershell

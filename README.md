@@ -29,7 +29,7 @@ Automatically installed when using the installer executable `ikusa-logger-instal
 
 1. Clone the repository
 2. Make sure you have the prerequisites installed (Node.js and Python)
-3. Run `build.bat`
+3. Run `scripts\\build.bat`
 
 ## Usage
 
