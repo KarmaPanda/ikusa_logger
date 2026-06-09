@@ -1,0 +1,29 @@
+# Developer tools' files
+.lite_workspace.lua
+
+# Neutralinojs binaries and builds
+/bin
+/dist/*
+/dist/**
+!/dist/ikusa-logger-installer.exe
+
+# Neutralinojs client (minified)
+neutralino.js
+
+# Neutralinojs related files
+.storage
+*.log
+
+.venv
+.tmp
+__pycache__
+dist/*
+dist/**
+!/dist/ikusa-logger-installer.exe
+logger/dist
+build
+Output
+test-data
+*.bak
+.dev-runtime
+pcap

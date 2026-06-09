@@ -1,0 +1,51 @@
+{
+  "applicationId": "ikusa.logger",
+  "version": "1.0.0",
+  "defaultMode": "window",
+  "documentRoot": "/ui/build/",
+  "url": "/",
+  "enableServer": true,
+  "enableNativeAPI": true,
+  "nativeAllowList": [
+    "app.exit",
+    "filesystem.readFile",
+    "filesystem.writeFile",
+    "filesystem.writeBinaryFile",
+    "os.open",
+    "os.showOpenDialog",
+    "os.showSaveDialog",
+    "os.spawnProcess",
+    "os.updateSpawnedProcess",
+    "os.execCommand",
+    "clipboard.writeText",
+    "storage.setData",
+    "storage.getData"
+  ],
+  "modes": {
+    "window": {
+      "title": "Ikusa Logger x KarmaPanda",
+      "width": 1200,
+      "height": 800,
+      "minWidth": 1000,
+      "minHeight": 800,
+      "icon": "/ui/static/logo.png",
+      "exitProcessOnClose": false,
+      "enableInspector": false
+    }
+  },
+  "cli": {
+    "binaryName": "ikusa-logger",
+    "resourcesPath": "/ui/build/",
+    "extensionsPath": "/extensions/",
+    "binaryVersion": "5.6.0",
+    "clientVersion": "5.6.0",
+    "frontendLibrary": {
+      "patchFile": "/ui/src/app.html",
+      "devUrl": "http://localhost:5178",
+      "projectPath": "/ui/",
+      "initCommand": "npm install",
+      "devCommand": "npm run dev",
+      "buildCommand": "npm run build"
+    }
+  }
+}

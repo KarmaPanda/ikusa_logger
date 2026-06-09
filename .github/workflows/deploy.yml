@@ -1,0 +1,77 @@
+name: Build and Release
+
+permissions:
+  contents: write
+
+on:
+    push:
+        branches:
+            - main
+    workflow_dispatch:
+
+jobs:
+    build-and-release:
+        runs-on: windows-latest
+
+        steps:
+            - name: Checkout code
+              uses: actions/checkout@v4
+
+            - name: Set up Node.js
+              uses: actions/setup-node@v4
+              with:
+                  node-version: 20
+
+            - name: Set up Python
+              uses: actions/setup-python@v5
+              with:
+                  python-version: '3.13'
+
+            - name: Install Inno Setup
+              shell: powershell
+              run: choco install innosetup --yes --no-progress
+
+            - name: Read version
+              id: version
+              shell: powershell
+              run: |
+                  $config = Get-Content '.\neutralino.config.json' -Raw | ConvertFrom-Json
+                  $version = [string]$config.version
+                  if (-not $version) {
+                      throw 'Failed to read version from neutralino.config.json'
+                  }
+                  $isPrerelease = if ($version -match '[A-Za-z]') { 'true' } else { 'false' }
+                  Add-Content -Path $env:GITHUB_OUTPUT -Value "version=$version"
+                  Add-Content -Path $env:GITHUB_OUTPUT -Value "tag=v$version"
+                  Add-Content -Path $env:GITHUB_OUTPUT -Value "zip=dist/ikusa-logger-$version.zip"
+                  Add-Content -Path $env:GITHUB_OUTPUT -Value "prerelease=$isPrerelease"
+
+            - name: Build release artifacts
+              shell: cmd
+              run: .\deploy.bat
+
+            - name: Verify release artifacts
+              shell: powershell
+              run: |
+                  $assets = @(
+                      'dist\ikusa-logger-installer.exe',
+                      '${{ steps.version.outputs.zip }}'
+                  )
+                  foreach ($asset in $assets) {
+                      if (-not (Test-Path $asset)) {
+                          throw "Missing release asset: $asset"
+                      }
+                  }
+
+            - name: Publish GitHub Release
+              uses: ncipollo/release-action@v1
+              with:
+                  tag: ${{ steps.version.outputs.tag }}
+                  name: Ikusa Logger ${{ steps.version.outputs.version }}
+                  commit: ${{ github.sha }}
+                  artifacts: dist/ikusa-logger-installer.exe,${{ steps.version.outputs.zip }}
+                  artifactErrorsFailBuild: true
+                  allowUpdates: true
+                  replacesArtifacts: true
+                  generateReleaseNotes: true
+                  prerelease: ${{ steps.version.outputs.prerelease }}
