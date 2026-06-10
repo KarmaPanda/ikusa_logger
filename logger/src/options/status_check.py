@@ -1,3 +1,5 @@
+"""Runtime dependency/config health checks shown via CLI status mode."""
+
 import os
 from datetime import datetime, timedelta
 from .. import config

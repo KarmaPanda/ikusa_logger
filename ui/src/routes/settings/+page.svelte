@@ -27,6 +27,8 @@
 
 	let ip_filter = true;
 	let diagnostics_enabled = true;
+	let available_discovery_processes: string[] = [];
+	let selected_discovery_process_index = 0;
 	let selected_ui_scale = 1;
 	let settings_loaded = false;
 	const ui_scale_options = ['75%', '100%', '125%'];
@@ -152,6 +154,89 @@
 		}
 	}
 
+	function parse_discovery_processes_output(raw_output: string): string[] {
+		const lines = raw_output
+			.split(/\r?\n/)
+			.map((line) => line.trim())
+			.filter(Boolean);
+
+		for (let index = lines.length - 1; index >= 0; index--) {
+			try {
+				const parsed = JSON.parse(lines[index]);
+				if (Array.isArray(parsed)) {
+					return parsed
+						.map((entry) => String(entry ?? '').trim())
+						.filter((entry) => entry.length > 0);
+				}
+			} catch {
+				// Continue scanning until a JSON payload is found.
+			}
+		}
+
+		return [];
+	}
+
+	async function load_discovery_processes() {
+		try {
+			const result = await run_logger_command('--list-discovery-processes --json');
+			const processes = parse_discovery_processes_output(result.stdOut);
+			available_discovery_processes = Array.from(new Set(processes));
+			selected_discovery_process_index = 0;
+		} catch (error) {
+			console.error(error);
+			available_discovery_processes = [];
+			selected_discovery_process_index = 0;
+		}
+	}
+
+	async function add_discovery_process() {
+		if (!config) {
+			return;
+		}
+		const selected = available_discovery_processes[selected_discovery_process_index] ?? '';
+		if (!selected) {
+			return;
+		}
+
+		const existing = Array.isArray(config.discovery_processes)
+			? [...config.discovery_processes]
+			: [];
+		if (existing.some((entry) => String(entry).toLowerCase() === selected.toLowerCase())) {
+			return;
+		}
+
+		const discovery_processes = [...existing, selected];
+		config = await update_config({ ...config, discovery_processes });
+	}
+
+	async function remove_discovery_process(process_name: string) {
+		if (!config) {
+			return;
+		}
+
+		const discovery_processes = (config.discovery_processes ?? []).filter(
+			(entry) => String(entry).toLowerCase() !== process_name.toLowerCase()
+		);
+		config = await update_config({ ...config, discovery_processes });
+	}
+
+	function get_active_discovery_targets() {
+		const base_targets = ['BlackDesert64.exe', 'ExitLag.exe'];
+		const configured = (config?.discovery_processes ?? [])
+			.map((entry) => String(entry ?? '').trim())
+			.filter((entry) => entry.length > 0);
+		const merged = [...base_targets];
+
+		for (const processName of configured) {
+			if (merged.some((existing) => existing.toLowerCase() === processName.toLowerCase())) {
+				continue;
+			}
+			merged.push(processName);
+		}
+
+		return merged;
+	}
+
 	$: if (settings_loaded) {
 		ip_filter;
 		update_ip_filter();
@@ -165,6 +250,7 @@
 	onMount(async () => {
 		config = await get_config();
 		await load_interfaces();
+		await load_discovery_processes();
 		if (config.all_interfaces === true || config.all_interfaces === undefined) {
 			selected_interface = 0;
 		} else if (config.interface_name) {
@@ -174,10 +260,7 @@
 			selected_interface = 1;
 		}
 		ip_filter = config.ip_filter === true || config.ip_filter === undefined ? true : false;
-		diagnostics_enabled =
-			config.diagnostics_enabled === true || config.diagnostics_enabled === undefined
-				? true
-				: false;
+		diagnostics_enabled = config.diagnostics_enabled === true;
 		selected_ui_scale = Math.max(
 			0,
 			ui_scale_values.findIndex((value) => value === config.ui_scale)
@@ -252,6 +335,65 @@
 					class="h-5 w-5 rounded border border-foreground-secondary bg-background text-gold-300"
 				/>
 			</label>
+		</div>
+		<div class="w-full">
+			<label for="discovery-processes" class="block mb-1 text-sm text-foreground"
+				>Additional Discovery Processes</label
+			>
+			<p class="mb-2 text-xs text-foreground-secondary">
+				Select a running process to discover relay/VPN IPs for filtering. BlackDesert64.exe and
+				ExitLag.exe are already included automatically.
+			</p>
+			<div class="flex gap-2">
+				<select
+					id="discovery-processes"
+					class="w-full rounded-lg border border-foreground-secondary/40 bg-background px-3 py-2 text-sm text-foreground"
+					bind:value={selected_discovery_process_index}
+				>
+					{#if available_discovery_processes.length === 0}
+						<option value={0}>No processes found</option>
+					{:else}
+						{#each available_discovery_processes as processName, index}
+							<option value={index}>{processName}</option>
+						{/each}
+					{/if}
+				</select>
+				<Button
+					class="shrink-0"
+					on:click={add_discovery_process}
+					disabled={available_discovery_processes.length === 0}
+				>
+					Add
+				</Button>
+			</div>
+			{#if (config.discovery_processes ?? []).length > 0}
+				<div class="mt-2 flex flex-wrap gap-2">
+					{#each config.discovery_processes as processName}
+						<span
+							class="inline-flex items-center gap-2 rounded-lg border border-foreground-secondary/40 px-2 py-1 text-xs text-foreground-secondary"
+						>
+							{processName}
+							<button
+								type="button"
+								class="rounded px-1 text-red-300 hover:bg-red-900/40"
+								on:click={() => remove_discovery_process(processName)}
+								title="Remove process"
+							>
+								x
+							</button>
+						</span>
+					{/each}
+				</div>
+			{/if}
+			<div class="mt-2 flex justify-end">
+				<Button class="w-full sm:w-auto" on:click={load_discovery_processes}>Refresh List</Button>
+			</div>
+			<div class="mt-3 rounded-lg border border-foreground-secondary/30 bg-background/60 px-3 py-2">
+				<p class="text-xs font-semibold text-foreground-secondary">Active Discovery Targets</p>
+				<p class="mt-1 text-xs text-foreground-secondary break-words">
+					{get_active_discovery_targets().join(', ')}
+				</p>
+			</div>
 		</div>
 		<div class="w-full">
 			<p class="block mb-1 text-sm text-foreground">UI Scale</p>

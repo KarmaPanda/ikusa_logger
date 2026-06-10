@@ -1,3 +1,5 @@
+"""Fetch latest upstream config.ini used by logger parsing offsets."""
+
 import urllib.request
 from .. import config
 from . import status_check

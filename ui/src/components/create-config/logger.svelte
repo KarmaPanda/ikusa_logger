@@ -45,7 +45,10 @@
 	export let logs: LogType[];
 	export let loading = false;
 
-	const dispatch = createEventDispatcher<{ saved: void }>();
+	const dispatch = createEventDispatcher<{
+		saved: void;
+		pcapRecordingChange: { recording: boolean };
+	}>();
 
 	let possible_name_offsets: { offset: number; count: number }[][] = [];
 	let name_indices: number[] = [0, 0, 0, 0, 0];
@@ -57,6 +60,11 @@
 
 	let possible_kill_offsets: number[] = [];
 	let kill_index = 0;
+	let kill_offset_manual_override = false;
+
+	const KILL_OFFSET_CONFIDENCE_MIN_COUNT = 12;
+	const KILL_OFFSET_CONFIDENCE_MIN_SHARE = 0.55;
+	const KILL_OFFSET_CONFIDENCE_MIN_LEAD = 1.25;
 
 	let config: Config;
 	let auto_scroll = true;
@@ -84,6 +92,16 @@
 	let pcap_capture_process_id: number | null = null;
 	let pcap_capture_output = '';
 	let pcap_stop_requested = false;
+
+	export function has_active_pcap_capture() {
+		return pcap_recording;
+	}
+
+	export async function stop_active_pcap_capture_for_exit() {
+		await stop_pcap_capture(true);
+	}
+
+	$: dispatch('pcapRecordingChange', { recording: pcap_recording });
 
 	function get_incidents_path() {
 		const today_iso = new Date().toISOString().slice(0, 10);
@@ -293,9 +311,59 @@
 	}
 
 	function refresh_kill_offsets(source_logs: LogType[]) {
-		const recalculated_offsets = find_kill_offset(source_logs).map((offset) => offset);
-		if (recalculated_offsets.length > 0) {
-			possible_kill_offsets = recalculated_offsets;
+		const recalculated_candidates = find_kill_offset(source_logs);
+		const recalculated_offsets = recalculated_candidates.map((entry) => entry.offset);
+		const selected_kill_offset = possible_kill_offsets[kill_index];
+		const configured_kill_offset = typeof config?.kill === 'number' ? config.kill : null;
+		const pinned_kill_offset =
+			typeof selected_kill_offset === 'number' && selected_kill_offset > 0
+				? selected_kill_offset
+				: configured_kill_offset;
+		const top_count = recalculated_candidates[0]?.count ?? 0;
+		const second_count = recalculated_candidates[1]?.count ?? 0;
+		const total_votes = recalculated_candidates.reduce((sum, entry) => sum + entry.count, 0);
+		const top_share = total_votes > 0 ? top_count / total_votes : 0;
+		const top_lead =
+			second_count > 0 ? top_count / second_count : top_count > 0 ? Number.POSITIVE_INFINITY : 0;
+		const has_confident_winner =
+			top_count >= KILL_OFFSET_CONFIDENCE_MIN_COUNT &&
+			top_share >= KILL_OFFSET_CONFIDENCE_MIN_SHARE &&
+			top_lead >= KILL_OFFSET_CONFIDENCE_MIN_LEAD;
+
+		if (recalculated_offsets.length === 0) {
+			if (
+				typeof pinned_kill_offset === 'number' &&
+				pinned_kill_offset > 0 &&
+				!possible_kill_offsets.includes(pinned_kill_offset)
+			) {
+				possible_kill_offsets = [pinned_kill_offset, ...possible_kill_offsets];
+				kill_index = 0;
+			}
+			return;
+		}
+
+		const pinned_missing =
+			typeof pinned_kill_offset === 'number' &&
+			pinned_kill_offset > 0 &&
+			!recalculated_offsets.includes(pinned_kill_offset);
+		const should_hold_pinned_offset =
+			!kill_offset_manual_override && pinned_missing && !has_confident_winner;
+
+		if (should_hold_pinned_offset) {
+			possible_kill_offsets = [pinned_kill_offset, ...recalculated_offsets];
+			kill_index = 0;
+			return;
+		}
+
+		possible_kill_offsets = recalculated_offsets;
+
+		if (
+			typeof pinned_kill_offset === 'number' &&
+			pinned_kill_offset > 0 &&
+			possible_kill_offsets.includes(pinned_kill_offset)
+		) {
+			kill_index = possible_kill_offsets.indexOf(pinned_kill_offset);
+			return;
 		}
 
 		if (kill_index >= possible_kill_offsets.length) {
@@ -719,13 +787,9 @@
 		const valid_core_names = core_names.filter((value) => is_valid_combat_name(value));
 		const valid_core_count = valid_core_names.length;
 		const unique_valid_core_count = new Set(valid_core_names).size;
-		const emitted_name_count = Array.isArray(log.names) ? log.names.length : 0;
 
-		if (valid_core_count === 3 && unique_valid_core_count === 3 && emitted_name_count >= 5) {
+		if (valid_core_count === 3 && unique_valid_core_count === 3) {
 			return 'complete' as const;
-		}
-		if (valid_core_count === 3 && unique_valid_core_count === 3 && emitted_name_count < 5) {
-			return 'partial' as const;
 		}
 		// Treat only one-missing-core records as partial.
 		if (valid_core_count === 2) {
@@ -762,7 +826,7 @@
 		// creates array sorted by value
 		const sorted = Array.from(possible_kill_offsets.entries())
 			.sort((a, b) => b[1] - a[1])
-			.map((a) => a[0] + 1);
+			.map(([offset, count]) => ({ offset: offset + 1, count }));
 
 		return sorted;
 	}
@@ -1201,6 +1265,7 @@
 							kill_index
 						},
 						onChange: async (options) => {
+							const previous_selected_kill_offset = possible_kill_offsets[kill_index];
 							possible_kill_offsets = options.possible_kill_offsets;
 							possible_name_offsets = options.possible_name_offsets;
 							name_indices = options.name_indices;
@@ -1208,6 +1273,14 @@
 							player_two_index = options.player_two_index;
 							guild_index = options.guild_index;
 							kill_index = options.kill_index;
+							const updated_selected_kill_offset = possible_kill_offsets[kill_index];
+							if (
+								typeof updated_selected_kill_offset === 'number' &&
+								updated_selected_kill_offset > 0 &&
+								updated_selected_kill_offset !== previous_selected_kill_offset
+							) {
+								kill_offset_manual_override = true;
+							}
 							config.ips = options.server_ips;
 							config.include_characters = options.include_characters;
 							remap_loaded_logs_from_selected_offsets();

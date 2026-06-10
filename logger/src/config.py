@@ -48,12 +48,16 @@ class Config (object):
             self.decoding_strategy = "utf16le"
         self.diagnostics_enabled = self._parse_bool(
             general.get("diagnostics"),
-            default=True,
+            default=False,
         )
         self.ip_filter_enabled = self._parse_bool(
             general.get("ip_filter"),
-            default=False,
+            default=True,
         )
+
+        discovery_section = self.config.get("DISCOVERY", {})
+        self.discovery_processes = self._parse_discovery_processes(
+            discovery_section)
 
         # get package informations
         self.package_config = self.config["PACKAGE"]
@@ -109,6 +113,24 @@ class Config (object):
 
         return fallback
 
+    @staticmethod
+    def _parse_discovery_processes(discovery_section):
+        parsed = []
+        for key, value in (discovery_section or {}).items():
+            normalized_key = str(key or "").strip().lower()
+            if not (normalized_key.startswith("process") or normalized_key == "extra_processes"):
+                continue
+
+            for token in re.split(r"[,;\n\r]+", str(value or "")):
+                name = str(token or "").strip()
+                if not name:
+                    continue
+                if any(existing.lower() == name.lower() for existing in parsed):
+                    continue
+                parsed.append(name)
+
+        return parsed
+
     def get_ips(self):
         return self.ips
 
@@ -138,6 +160,9 @@ class Config (object):
 
     def get_ip_filter_enabled(self):
         return self.ip_filter_enabled
+
+    def get_discovery_processes(self):
+        return self.discovery_processes
 
 
 def init(filename="config.ini"):

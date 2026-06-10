@@ -5,6 +5,7 @@ export type Config = {
 	patch: string;
 	decoding_strategy: string;
 	identifier: string;
+	discovery_processes: string[];
 	ips: string[];
 	player_one: number;
 	player_two: number;
@@ -171,18 +172,19 @@ const DEFAULT_IPS = KNOWN_SERVER_IPS;
 const DEFAULT_CONFIG: Config = {
 	decoding_strategy: 'utf16le',
 	identifier: '',
+	discovery_processes: [],
 	ips: [...DEFAULT_IPS],
 	player_one: 0,
 	player_two: 0,
 	guild: 0,
 	kill: 0,
 	patch: '',
-	diagnostics_enabled: true,
+	diagnostics_enabled: false,
 	auto_scroll: true,
 	include_characters: true,
 	all_interfaces: true,
 	interface_name: '',
-	ip_filter: false,
+	ip_filter: true,
 	ui_scale: 1
 };
 
@@ -273,6 +275,26 @@ function normalize_ip_prefixes(values: unknown) {
 	return [...DEFAULT_IPS];
 }
 
+function normalize_process_names(values: unknown) {
+	if (!Array.isArray(values)) {
+		return [];
+	}
+
+	const deduped: string[] = [];
+	for (const value of values) {
+		const normalized = String(value ?? '').trim();
+		if (!normalized) {
+			continue;
+		}
+		if (deduped.some((existing) => existing.toLowerCase() === normalized.toLowerCase())) {
+			continue;
+		}
+		deduped.push(normalized);
+	}
+
+	return deduped;
+}
+
 function normalize_decoding_strategy(value: unknown, legacy_region?: unknown) {
 	const normalized = String(value ?? '')
 		.trim()
@@ -325,7 +347,21 @@ function parse_config_file(raw_config: string): Partial<Config> {
 
 	const package_section = sections.get('PACKAGE');
 	const general_section = sections.get('GENERAL');
+	const discovery_section = sections.get('DISCOVERY');
 	const ip_section = sections.get('IP');
+	const discovery_values = discovery_section
+		? Array.from(discovery_section.entries())
+			.filter(([key]) => {
+				const normalized = key.toLowerCase();
+				return normalized.startsWith('process') || normalized === 'extra_processes';
+			})
+			.flatMap(([, value]) =>
+				String(value ?? '')
+					.split(/[;,\r\n]+/)
+					.map((entry) => entry.trim())
+					.filter(Boolean)
+			)
+		: [];
 	const ips_from_file = ip_section
 		? Array.from(ip_section.values()).filter((prefix) => is_valid_ip_prefix(prefix))
 		: [];
@@ -337,9 +373,10 @@ function parse_config_file(raw_config: string): Partial<Config> {
 			general_section?.get('region')
 		),
 		identifier: String(package_section?.get('identifier') ?? '').trim().toLowerCase(),
+		discovery_processes: normalize_process_names(discovery_values),
 		ips: ips_from_file,
-		diagnostics_enabled: ['1', 'true', 'yes', 'on'].includes((general_section?.get('diagnostics') ?? 'true').toLowerCase()),
-		ip_filter: ['1', 'true', 'yes', 'on'].includes((general_section?.get('ip_filter') ?? 'false').toLowerCase()),
+		diagnostics_enabled: ['1', 'true', 'yes', 'on'].includes((general_section?.get('diagnostics') ?? 'false').toLowerCase()),
+		ip_filter: ['1', 'true', 'yes', 'on'].includes((general_section?.get('ip_filter') ?? 'true').toLowerCase()),
 		all_interfaces: !['0', 'false', 'no', 'off'].includes((general_section?.get('all_interfaces') ?? 'true').toLowerCase()),
 		interface_name: general_section?.get('interface') ?? '',
 		player_one: parse_number(package_section?.get('player_one'), DEFAULT_CONFIG.player_one) ?? DEFAULT_CONFIG.player_one,
@@ -363,6 +400,7 @@ function normalize_config(config?: Partial<Config> | null): Config {
 			typeof config?.identifier === 'string'
 				? config.identifier.trim().toLowerCase()
 				: DEFAULT_CONFIG.identifier,
+		discovery_processes: normalize_process_names(config?.discovery_processes),
 		ips: normalize_ip_prefixes(config?.ips),
 		player_one:
 			typeof config?.player_one === 'number' ? config.player_one : DEFAULT_CONFIG.player_one,
@@ -482,17 +520,22 @@ export function get_default_server_ips() {
 
 export function stringify_config(config: Config) {
 	const ips = normalize_ip_prefixes(config.ips);
+	const discovery_processes = normalize_process_names(config.discovery_processes);
 	const ip_lines = ips
 		.map((prefix, index) => `server_${index + 1} = ${prefix}`)
 		.join('\n');
+	const discovery_lines = discovery_processes
+		.map((name, index) => `process_${index + 1} = ${name}`)
+		.join('\n');
+	const discovery_block = discovery_lines.length > 0 ? `[DISCOVERY]\n${discovery_lines}\n` : '';
 	return `[GENERAL]
 patch=${normalize_patch_date(config.patch || get_date())}
 decoding_strategy=${normalize_decoding_strategy(config.decoding_strategy)}
 diagnostics=${config.diagnostics_enabled ? 'true' : 'false'}
-	ip_filter=${config.ip_filter ? 'true' : 'false'}
+ip_filter=${config.ip_filter ? 'true' : 'false'}
 all_interfaces=${config.all_interfaces ? 'true' : 'false'}
 interface=${config.interface_name || ''}
-[IP]
+${discovery_block}[IP]
 ${ip_lines}
 [PACKAGE]
 identifier = ${config.identifier || ''}

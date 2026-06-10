@@ -12,6 +12,7 @@
 	import { filesystem } from '@neutralinojs/lib';
 	import { onDestroy } from 'svelte';
 	import LogEditor from '../../components/create-config/log-editor.svelte';
+	import { clear_exit_guard_state, set_exit_guard_state } from '../../logic/navigation-guard';
 	let logs: LogType[] = [];
 	let combat_logs: Log[] = [];
 	let loading = false;
@@ -19,6 +20,11 @@
 	let pcap_progress_total = 0;
 	let pcap_progress_percent = 0;
 	let stopping_replay = false;
+	let has_active_separate_pcap = false;
+	let logger_component: {
+		stop_active_pcap_capture_for_exit?: () => Promise<void>;
+		has_active_pcap_capture?: () => boolean;
+	} | null = null;
 
 	let is_network = false;
 
@@ -75,6 +81,7 @@
 	async function open_pcap() {
 		logs = [];
 		combat_logs = [];
+		has_active_separate_pcap = false;
 		pcap_progress_current = 0;
 		pcap_progress_total = 0;
 		const filePaths = await open_file();
@@ -118,6 +125,25 @@
 		}
 	}
 
+	async function stop_active_separate_pcap_for_exit() {
+		if (!logger_component?.stop_active_pcap_capture_for_exit) {
+			return;
+		}
+
+		await logger_component.stop_active_pcap_capture_for_exit();
+		has_active_separate_pcap = false;
+	}
+
+	function handle_pcap_recording_change(event: CustomEvent<{ recording: boolean }>) {
+		has_active_separate_pcap = event.detail.recording === true;
+	}
+
+	$: set_exit_guard_state({
+		has_log_entries: logs.length > 0 || combat_logs.length > 0,
+		has_active_separate_pcap,
+		stop_active_separate_pcap: stop_active_separate_pcap_for_exit
+	});
+
 	async function stop_pcap_replay() {
 		if (!loading || stopping_replay) {
 			return;
@@ -135,6 +161,7 @@
 	}
 
 	onDestroy(() => {
+		clear_exit_guard_state();
 		stop_logger().catch((error) => console.error(error));
 	});
 </script>
@@ -168,7 +195,12 @@
 	{/if}
 	<div class="flex-1 min-h-0">
 		{#if is_network}
-			<Logger {logs} {loading} />
+			<Logger
+				bind:this={logger_component}
+				{logs}
+				{loading}
+				on:pcapRecordingChange={handle_pcap_recording_change}
+			/>
 		{:else}
 			<LogEditor logs={combat_logs} {loading} />
 		{/if}

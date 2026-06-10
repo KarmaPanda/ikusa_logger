@@ -3,7 +3,7 @@
 
 #define MyAppName "Ikusa Logger"
 #ifndef MyAppVersion
-	#define MyAppVersion "1.0.0"
+	#define MyAppVersion "1.0.1"
 #endif
 #define MyAppPublisher "KarmaPanda"
 #define MyAppURL "https://github.com/KarmaPanda/ikusa_logger"

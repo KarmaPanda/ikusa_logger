@@ -16,6 +16,7 @@
 	} from '../../components/create-config/config';
 	import { get_runtime_path } from '../../logic/runtime-path';
 	import { show_toast } from '../../svelte-ui/util';
+	import { clear_exit_guard_state, set_exit_guard_state } from '../../logic/navigation-guard';
 
 	let logs: LogType[] = [];
 	let is_destroyed = false;
@@ -25,6 +26,11 @@
 	let config: Config;
 	let recovery_flush_timeout: number | null = null;
 	let recovery_pending_write = false;
+	let has_active_separate_pcap = false;
+	let logger_component: {
+		stop_active_pcap_capture_for_exit?: () => Promise<void>;
+		has_active_pcap_capture?: () => boolean;
+	} | null = null;
 
 	const RECOVERY_SNAPSHOT_PATH = get_runtime_path('logger\\.tmp\\record-session-recovery.json');
 
@@ -247,8 +253,29 @@
 		config = await get_config();
 		await start_analyze_logger('initial');
 	});
+
+	async function stop_active_separate_pcap_for_exit() {
+		if (!logger_component?.stop_active_pcap_capture_for_exit) {
+			return;
+		}
+
+		await logger_component.stop_active_pcap_capture_for_exit();
+		has_active_separate_pcap = false;
+	}
+
+	function handle_pcap_recording_change(event: CustomEvent<{ recording: boolean }>) {
+		has_active_separate_pcap = event.detail.recording === true;
+	}
+
+	$: set_exit_guard_state({
+		has_log_entries: logs.length > 0,
+		has_active_separate_pcap,
+		stop_active_separate_pcap: stop_active_separate_pcap_for_exit
+	});
+
 	onDestroy(() => {
 		is_destroyed = true;
+		clear_exit_guard_state();
 		if (recovery_flush_timeout !== null) {
 			window.clearTimeout(recovery_flush_timeout);
 			recovery_flush_timeout = null;
@@ -260,4 +287,9 @@
 	});
 </script>
 
-<Logger {logs} on:saved={handle_logs_saved} />
+<Logger
+	bind:this={logger_component}
+	{logs}
+	on:saved={handle_logs_saved}
+	on:pcapRecordingChange={handle_pcap_recording_change}
+/>

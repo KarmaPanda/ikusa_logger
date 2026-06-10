@@ -1,3 +1,17 @@
+"""CLI entrypoint for logger backend modes.
+
+This module wires command-line arguments to runtime modes:
+- sniff: live parse/write logs from network
+- analyze: live calibration stream or pcap analyzer output
+- open/file: replay pcap and write normal logs
+- record: write separate pcap capture (no parsing)
+
+Behavior notes:
+- record defaults to IP filter enabled unless explicitly overridden.
+- pcap replay disables IP filter because relay endpoints can differ from
+    the original capture session.
+"""
+
 import sys
 
 if sys.stdout and hasattr(sys.stdout, "reconfigure"):
@@ -64,6 +78,8 @@ parser.add_argument("--json", dest="json_output", action="store_true",
                     help="Emit JSON output where supported")
 parser.add_argument("--discover-game-ips", dest="discover_game_ips",
                     help="Discover active TCP remote IP prefixes for the running game process", action=BooleanOptionalAction)
+parser.add_argument("--list-discovery-processes", dest="list_discovery_processes",
+                    help="List running process names for discovery target selection", action=BooleanOptionalAction)
 parser.add_argument("--game-process", dest="game_process", default="BlackDesert64.exe",
                     help="Process name to inspect for active connections")
 parser.add_argument("--include-exitlag", dest="include_exitlag",
@@ -83,6 +99,10 @@ if args.list_interfaces:
     analyzer.list_interfaces(json_output=args.json_output)
     exit()
 
+if args.list_discovery_processes:
+    discover_game.list_process_names(json_output=args.json_output)
+    exit()
+
 config.init(_get_config_path())
 
 
@@ -90,7 +110,7 @@ def _init_diagnostics_if_needed():
     if args.status or args.update:
         return
 
-    if not getattr(config.config, "diagnostics_enabled", True):
+    if not getattr(config.config, "diagnostics_enabled", False):
         return
 
     diagnostics.init(args.output)
@@ -102,7 +122,14 @@ _init_diagnostics_if_needed()
 def _resolve_ip_filter(value):
     if isinstance(value, bool):
         return value
-    return getattr(config.config, "ip_filter_enabled", False)
+    return getattr(config.config, "ip_filter_enabled", True)
+
+
+def _resolve_record_ip_filter(value):
+    if isinstance(value, bool):
+        return value
+    # Separate PCAP capture defaults to filtered packets only.
+    return True
 
 
 resolved_ip_filter = _resolve_ip_filter(args.ipFilter)
@@ -114,7 +141,7 @@ elif args.record:
     record.record(
         args.output,
         all_interfaces=bool(args.allInterfaces),
-        ip_filter=resolved_ip_filter,
+        ip_filter=_resolve_record_ip_filter(args.ipFilter),
         interface_name=args.interface_name,
     )
     exit()

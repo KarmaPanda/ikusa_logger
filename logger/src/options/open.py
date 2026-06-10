@@ -1,3 +1,5 @@
+"""Offline replay mode that parses a pcap into normal logger output."""
+
 import os
 from scapy.all import sniff
 from .. import parser

@@ -11,6 +11,7 @@ _THAI_CHAR_REGEX = re.compile(r"[\u0E01-\u0E3A\u0E40-\u0E4E]")
 
 
 def _is_thai_name_regex_match(name):
+    """Return True when a name matches the stricter Thai-name fast path."""
     if not isinstance(name, str):
         return False
     if not _THAI_NAME_REGEX.fullmatch(name):
@@ -21,6 +22,7 @@ def _is_thai_name_regex_match(name):
 
 
 def is_valid_name_char(ch):
+    """Validate a single character against supported combat-name scripts."""
     if ch.isascii():
         return ch.isalnum() or ch in ("_", "-")
 
@@ -35,6 +37,7 @@ def is_valid_name_char(ch):
 
 
 def is_valid_name(name):
+    """General name validator used for normal emit-stage acceptance."""
     if not isinstance(name, str):
         return False
     if not (2 <= len(name) <= 32):
@@ -51,6 +54,7 @@ def is_valid_name(name):
 
 
 def is_valid_name_strict(name):
+    """Stricter name validator used for scoring and quality gates."""
     if not isinstance(name, str):
         return False
     if not (2 <= len(name) <= 32):
@@ -94,17 +98,20 @@ def validate_name_relaxed(name):
 
 
 def validate_name_for_mode(name, validate_names=True):
+    """Choose strict vs relaxed name validation based on runtime mode."""
     if validate_names:
         return is_valid_name(name)
     return validate_name_relaxed(name)
 
 
 def _candidate_name_score(name, offset, center_offset):
+    """Score a name candidate by strictness, length, and offset distance."""
     strict_bonus = 1000 if is_valid_name_strict(name) else 0
     return strict_bonus + (len(name) * 10) - abs(offset - center_offset)
 
 
 def _extract_best_name_near(payload, center_offset, length, search_radius=28, decoding_strategy=None, region=None, validate_names=True):
+    """Find the highest-scoring decodable name near an expected offset."""
     best_name = None
     best_offset = center_offset
     best_score = -10**9
@@ -129,6 +136,7 @@ def _extract_best_name_near(payload, center_offset, length, search_radius=28, de
 
 
 def _extract_edge_shift_repair(payload, current_name, current_offset, length, decoding_strategy=None, search_radius=4, validate_names=True):
+    """Repair one-code-unit boundary shifts that clip leading characters."""
     if not is_valid_name_strict(current_name):
         return None, current_offset
 
@@ -178,11 +186,13 @@ def _extract_edge_shift_repair(payload, current_name, current_offset, length, de
 
 
 def resolve_kill_flag(payload, kill_offset):
+    """Backward-compatible helper returning only the parsed kill boolean."""
     _is_valid, is_kill = parse_kill_flag(payload, kill_offset)
     return is_kill
 
 
 def parse_kill_flag(payload, kill_offset):
+    """Parse kill flag marker and return (is_valid, is_kill)."""
     if isinstance(kill_offset, int):
         flag = payload[kill_offset:kill_offset + 1]
         if flag in ("0", "1"):
@@ -191,6 +201,7 @@ def parse_kill_flag(payload, kill_offset):
 
 
 def resolve_offsets(payload, cfg=None, decoding_strategy=None, region=None, validate_names=True):
+    """Resolve guild/player offsets with delta and nearby-repair fallback."""
     cfg = cfg or config.config
     effective_strategy = decoding_strategy if decoding_strategy is not None else region
 
@@ -337,6 +348,7 @@ def resolve_offsets(payload, cfg=None, decoding_strategy=None, region=None, vali
 
 
 def extract_core_candidates(payload, cfg=None, decoding_strategy=None, region=None, validate_names=True):
+    """Extract validated core (player_one, player_two, guild) candidates."""
     resolved = resolve_offsets(
         payload,
         cfg=cfg,
@@ -361,6 +373,7 @@ def extract_core_candidates(payload, cfg=None, decoding_strategy=None, region=No
 
 
 def collect_names(possible_log, name_length=64, decoding_strategy=None):
+    """Scan a payload window and collect relaxed-valid name candidates."""
     names = []
     i = 0
     max_len = len(possible_log)
@@ -387,6 +400,7 @@ def collect_names(possible_log, name_length=64, decoding_strategy=None):
 
 
 def pick_name_near_offset(collected, target_offset, used_indices):
+    """Pick the best unused candidate nearest to a target offset."""
     candidates = []
     for idx, (name, offset) in enumerate(collected):
         # used_indices now stores selected offsets, not tuple indices.
@@ -418,6 +432,7 @@ def pick_name_near_offset(collected, target_offset, used_indices):
 
 
 def resolve_roles_from_collected(collected, cfg=None):
+    """Map collected names to guild/player roles by configured offsets."""
     cfg = cfg or config.config
     used_indices = set()
 
@@ -442,6 +457,7 @@ def resolve_roles_from_collected(collected, cfg=None):
 
 
 def extract_roles_with_strategy(possible_log, cfg=None, decoding_strategy=None):
+    """Extract role triplet using decoding-strategy-specific heuristics."""
     cfg = cfg or config.config
 
     if str(decoding_strategy or getattr(cfg, "decoding_strategy", "")).lower() != "latin1":
@@ -496,6 +512,7 @@ def extract_roles_with_strategy(possible_log, cfg=None, decoding_strategy=None):
 
 
 def _extract_direct_name(possible_log, offset, name_length, decoding_strategy):
+    """Decode a name at an exact offset without fallback search."""
     return extract_string(
         possible_log,
         offset,
@@ -505,6 +522,7 @@ def _extract_direct_name(possible_log, offset, name_length, decoding_strategy):
 
 
 def _extract_direct_name_near(possible_log, offset, name_length, decoding_strategy):
+    """Decode a name at offset with tiny +/-2 boundary tolerance."""
     for delta in (0, -2, 2):
         candidate_offset = offset + delta
         if candidate_offset < 0:
@@ -526,6 +544,7 @@ def _extract_direct_name_near(possible_log, offset, name_length, decoding_strate
 
 
 def extract_roles_legacy_minimal(possible_log, cfg=None, decoding_strategy=None):
+    """Legacy fast-path role extraction using direct configured offsets."""
     cfg = cfg or config.config
 
     guild, guild_offset = _extract_direct_name_near(
@@ -549,6 +568,7 @@ def extract_roles_legacy_minimal(possible_log, cfg=None, decoding_strategy=None)
 
 
 def _is_latin1_name(name):
+    """Validate a latin1-style combat name with conservative rules."""
     if not isinstance(name, str):
         return False
     if len(name) < 3 or len(name) > 32:
@@ -575,6 +595,7 @@ def _is_latin1_name(name):
 
 
 def _looks_like_shifted_duplicate(name_a, name_b):
+    """Detect one-character shift variants from boundary misalignment."""
     if not isinstance(name_a, str) or not isinstance(name_b, str):
         return False
 
@@ -600,6 +621,7 @@ def _looks_like_shifted_duplicate(name_a, name_b):
 
 
 def looks_low_quality_roles(roles, decoding_strategy=None):
+    """Return True when a role triplet looks too noisy to emit."""
     if not roles:
         return True
 
@@ -681,6 +703,7 @@ def looks_low_quality_roles(roles, decoding_strategy=None):
 
 
 def name_quality_score(name):
+    """Score a single name candidate for merge and fallback decisions."""
     if not isinstance(name, str):
         return -10**9
 
@@ -712,6 +735,7 @@ def name_quality_score(name):
 
 
 def roles_quality_score(roles):
+    """Aggregate quality score for a role triplet candidate."""
     if not roles:
         return -10**9
 
@@ -730,6 +754,7 @@ def roles_quality_score(roles):
 
 
 def _choose_better_role(role, primary, alternate):
+    """Choose the better role field/value between two role candidates."""
     role_offset = f"{role}_offset"
 
     p_name = primary.get(role) if primary else None
@@ -745,6 +770,7 @@ def _choose_better_role(role, primary, alternate):
 
 
 def merge_role_candidates(primary, alternate):
+    """Merge two role candidates by selecting best-per-role values."""
     if primary is None:
         return alternate
     if alternate is None:
@@ -763,6 +789,7 @@ def merge_role_candidates(primary, alternate):
 
 
 def select_best_roles(possible_log, cfg=None, decoding_strategy=None):
+    """Top-level role resolver used by parser and analyzer paths."""
     cfg = cfg or config.config
     preferred_strategy = decoding_strategy
     if preferred_strategy is None:
@@ -818,6 +845,7 @@ def select_best_roles(possible_log, cfg=None, decoding_strategy=None):
 
 
 def roles_to_candidates(roles):
+    """Convert resolved role dict into ordered (name, offset) tuples."""
     if not roles:
         return []
 
@@ -829,6 +857,7 @@ def roles_to_candidates(roles):
 
 
 def roles_to_emitted_candidates(possible_log, roles, cfg=None, decoding_strategy=None, max_candidates=5):
+    """Build emitted name list from core roles plus optional extras."""
     cfg = cfg or config.config
     core_candidates = roles_to_candidates(roles)
     if not core_candidates:

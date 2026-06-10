@@ -16,6 +16,9 @@ last_emitted_signature = None
 _recent_emitted_signatures = deque(maxlen=256)
 _last_emitted_second_by_combat = {}
 _last_emitted_second_by_text = {}
+_last_emitted_payload_by_combat = {}
+_last_emitted_payload_by_text = {}
+DUPLICATE_SUPPRESSION_SECONDS = 2
 identifier_regex = r"[56][0-9a-f]0100[0-9a-f]{4}"
 _IDENTIFIER_HEX_PATTERN = re.compile(r"^[0-9a-f]{10}$")
 _IDENTIFIER_FALLBACK_PATTERN = re.compile(identifier_regex)
@@ -112,6 +115,12 @@ def _select_identifier_match(matches, payload_length, log_length):
 def _emit_legacy_fork_logs(payload, output, package_time, cfg, emitted_logs):
     global last_payload
     global last_emitted_log
+    global last_emitted_signature
+    global _recent_emitted_signatures
+    global _last_emitted_second_by_combat
+    global _last_emitted_second_by_text
+    global _last_emitted_payload_by_combat
+    global _last_emitted_payload_by_text
 
     current_payload = payload
 
@@ -163,11 +172,66 @@ def _emit_legacy_fork_logs(payload, output, package_time, cfg, emitted_logs):
         else:
             log = f"[{timestamp}] {player_one} died to {player_two} from {guild}"
 
-        if log != last_emitted_log:
-            print(log, flush=True)
-            emitted_logs.append(log)
-            diagnostics.increment("parser.records_written")
-            last_emitted_log = log
+        log_body = log.split("] ", 1)[1] if "] " in log else log
+        payload_fingerprint = current_payload[:cfg.log_length]
+        combat_signature = (
+            bool(is_kill),
+            player_one,
+            player_two,
+            guild,
+        )
+        current_signature = combat_signature + (timestamp,)
+        event_second = _timestamp_to_seconds(timestamp)
+        previous_second = _last_emitted_second_by_combat.get(combat_signature)
+        previous_text_second = _last_emitted_second_by_text.get(log_body)
+        duplicate_within_window = (
+            previous_second is not None
+            and event_second is not None
+            and abs(event_second - previous_second) <= DUPLICATE_SUPPRESSION_SECONDS
+            and _last_emitted_payload_by_combat.get(combat_signature) == payload_fingerprint
+        )
+        duplicate_text_within_window = (
+            previous_text_second is not None
+            and event_second is not None
+            and abs(event_second - previous_text_second) <= DUPLICATE_SUPPRESSION_SECONDS
+            and _last_emitted_payload_by_text.get(log_body) == payload_fingerprint
+        )
+
+        if (
+            log == last_emitted_log
+            or current_signature == last_emitted_signature
+            or current_signature in _recent_emitted_signatures
+            or duplicate_within_window
+            or duplicate_text_within_window
+        ):
+            diagnostics.increment("parser.records_suppressed_duplicate")
+            current_payload = current_payload[len(cfg.identifier):]
+            last_payload = ""
+            continue
+
+        print(log, flush=True)
+        emitted_logs.append(log)
+        diagnostics.increment("parser.records_written")
+        last_emitted_log = log
+        last_emitted_signature = current_signature
+        _recent_emitted_signatures.append(current_signature)
+        if event_second is not None:
+            _last_emitted_second_by_combat[combat_signature] = event_second
+            _last_emitted_second_by_text[log_body] = event_second
+            _last_emitted_payload_by_combat[combat_signature] = payload_fingerprint
+            _last_emitted_payload_by_text[log_body] = payload_fingerprint
+            if len(_last_emitted_second_by_combat) > 2048:
+                _last_emitted_second_by_combat.pop(
+                    next(iter(_last_emitted_second_by_combat)))
+            if len(_last_emitted_payload_by_combat) > 2048:
+                _last_emitted_payload_by_combat.pop(
+                    next(iter(_last_emitted_payload_by_combat)))
+            if len(_last_emitted_second_by_text) > 2048:
+                _last_emitted_second_by_text.pop(
+                    next(iter(_last_emitted_second_by_text)))
+            if len(_last_emitted_payload_by_text) > 2048:
+                _last_emitted_payload_by_text.pop(
+                    next(iter(_last_emitted_payload_by_text)))
 
         current_payload = current_payload[len(cfg.identifier):]
         last_payload = ""
@@ -183,6 +247,8 @@ def package_handler(package, output, record=False, record_all_tcp=False, ip_filt
     global _recent_emitted_signatures
     global _last_emitted_second_by_combat
     global _last_emitted_second_by_text
+    global _last_emitted_payload_by_combat
+    global _last_emitted_payload_by_text
 
     if "IP" not in package:
         return
@@ -274,6 +340,14 @@ def package_handler(package, output, record=False, record_all_tcp=False, ip_filt
             diagnostics.increment("parser.records_rejected_low_quality")
             continue
 
+        if core_heuristics.looks_low_quality_roles(
+            roles,
+            decoding_strategy=decoding_strategy,
+        ):
+            payload = payload[len(selected_match.group(0)):]
+            diagnostics.increment("parser.records_rejected_low_quality")
+            continue
+
         if str(decoding_strategy or getattr(cfg, "decoding_strategy", "")).lower() != "latin1":
             emitted_candidates = core_heuristics.roles_to_emitted_candidates(
                 possible_log,
@@ -294,6 +368,7 @@ def package_handler(package, output, record=False, record_all_tcp=False, ip_filt
         else:
             log = f"[{timestamp}] {roles['player_one']} died to {roles['player_two']} from {roles['guild']}"
         log_body = log.split("] ", 1)[1] if "] " in log else log
+        payload_fingerprint = possible_log
 
         combat_signature = (
             bool(is_kill),
@@ -308,12 +383,14 @@ def package_handler(package, output, record=False, record_all_tcp=False, ip_filt
         duplicate_within_one_second = (
             previous_second is not None
             and event_second is not None
-            and abs(event_second - previous_second) <= 1
+            and abs(event_second - previous_second) <= DUPLICATE_SUPPRESSION_SECONDS
+            and _last_emitted_payload_by_combat.get(combat_signature) == payload_fingerprint
         )
         duplicate_text_within_one_second = (
             previous_text_second is not None
             and event_second is not None
-            and abs(event_second - previous_text_second) <= 1
+            and abs(event_second - previous_text_second) <= DUPLICATE_SUPPRESSION_SECONDS
+            and _last_emitted_payload_by_text.get(log_body) == payload_fingerprint
         )
 
         # Retransmits can repeat the same combat record within the same second.
@@ -338,12 +415,20 @@ def package_handler(package, output, record=False, record_all_tcp=False, ip_filt
         if event_second is not None:
             _last_emitted_second_by_combat[combat_signature] = event_second
             _last_emitted_second_by_text[log_body] = event_second
+            _last_emitted_payload_by_combat[combat_signature] = payload_fingerprint
+            _last_emitted_payload_by_text[log_body] = payload_fingerprint
             if len(_last_emitted_second_by_combat) > 2048:
                 _last_emitted_second_by_combat.pop(
                     next(iter(_last_emitted_second_by_combat)))
+            if len(_last_emitted_payload_by_combat) > 2048:
+                _last_emitted_payload_by_combat.pop(
+                    next(iter(_last_emitted_payload_by_combat)))
             if len(_last_emitted_second_by_text) > 2048:
                 _last_emitted_second_by_text.pop(
                     next(iter(_last_emitted_second_by_text)))
+            if len(_last_emitted_payload_by_text) > 2048:
+                _last_emitted_payload_by_text.pop(
+                    next(iter(_last_emitted_payload_by_text)))
 
         diagnostics.increment("parser.records_written")
         payload = payload[len(selected_match.group(0)):]

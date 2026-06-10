@@ -5,27 +5,7 @@ import subprocess
 from collections import Counter
 
 from .. import config
-
-
-def _collect_target_processes(process_name, include_exitlag=True):
-    names = []
-    primary = _normalize_process_name(process_name)
-    if primary:
-        names.append(primary)
-
-    if include_exitlag:
-        exitlag_name = "ExitLag.exe"
-        if not any(name.lower() == exitlag_name.lower() for name in names):
-            names.append(exitlag_name)
-
-    return names
-
-
-def _normalize_process_name(process_name):
-    value = str(process_name or "").strip()
-    if not value:
-        return "BlackDesert64.exe"
-    return value
+from .. import settings
 
 
 def _run_command_safe(command):
@@ -243,6 +223,44 @@ def _build_summary(connections, min_hits=2, min_confidence=0.20):
     }
 
 
+def list_process_names(json_output=False):
+    """List running process image names from the local system."""
+    result = _run_command_safe(["tasklist", "/FO", "CSV", "/NH"])
+
+    process_names = []
+    seen = set()
+    for raw_line in result.stdout.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("INFO:"):
+            continue
+        try:
+            row = next(csv.reader([line]))
+        except Exception:
+            continue
+        if len(row) < 1:
+            continue
+
+        name = str(row[0] or "").strip().strip('"')
+        if not name:
+            continue
+
+        lowered = name.lower()
+        if lowered in seen:
+            continue
+        seen.add(lowered)
+        process_names.append(name)
+
+    process_names.sort(key=lambda value: value.lower())
+
+    if json_output:
+        print(json.dumps(process_names), flush=True)
+    else:
+        for process_name in process_names:
+            print(process_name, flush=True)
+
+    return process_names
+
+
 def run(
     process_name="BlackDesert64.exe",
     include_exitlag=True,
@@ -252,26 +270,33 @@ def run(
     min_confidence=0.20,
     json_output=False,
 ):
-    target_processes = _collect_target_processes(
+    target_processes = settings.get_discovery_target_processes(
         process_name, include_exitlag=include_exitlag)
     pid_to_process = {}
     for target in target_processes:
         for pid in _extract_process_pids(target):
             pid_to_process[pid] = target
 
-    normalized_process_name = _normalize_process_name(process_name)
+    normalized_process_name = settings.normalize_process_name(
+        process_name) or "BlackDesert64.exe"
+    relay_processes = [
+        name
+        for name in target_processes
+        if name.lower() != normalized_process_name.lower()
+    ]
     pids = sorted(pid_to_process.keys())
     connections = _list_pid_connections(pid_to_process)
 
-    # Separate ExitLag relay connections from direct BDO server connections so
-    # that dynamic relay IPs are never written to config.ini.
-    exitlag_connections = [
+    # Separate relay/VPN process connections from direct game connections so
+    # transient relay IPs are never written to config.ini.
+    relay_name_set = {name.lower() for name in relay_processes}
+    relay_connections = [
         c for c in connections
-        if c.get("process_name", "").lower() == "exitlag.exe"
+        if c.get("process_name", "").lower() in relay_name_set
     ]
     bdo_connections = [
         c for c in connections
-        if c.get("process_name", "").lower() != "exitlag.exe"
+        if c.get("process_name", "").lower() == normalized_process_name.lower()
     ]
 
     resolved_min_hits = max(1, int(min_hits))
@@ -287,12 +312,12 @@ def run(
         min_hits=resolved_min_hits,
         min_confidence=resolved_min_confidence,
     )
-    exitlag_summary = _build_summary(
-        exitlag_connections,
+    relay_summary = _build_summary(
+        relay_connections,
         min_hits=1,
         min_confidence=0.0,
     )
-    exitlag_endpoints = _collect_unique_remote_ips(exitlag_connections)
+    relay_endpoints = _collect_unique_remote_ips(relay_connections)
 
     # Persist only BDO-direct prefixes (stable server IPs) to config.ini.
     applied_ips = []
@@ -305,33 +330,42 @@ def run(
     applied_transient_endpoints = []
     active_exitlag_endpoint = ""
     if apply_transient:
-        config.add_transient_ips(exitlag_summary["high_confidence_prefixes"])
-        config.add_transient_endpoints(exitlag_endpoints)
+        config.add_transient_ips(relay_summary["high_confidence_prefixes"])
+        config.add_transient_endpoints(relay_endpoints)
         active_exitlag_endpoint = config.refresh_active_exitlag_endpoint(
-            exitlag_endpoints)
-        applied_transient_ips = exitlag_summary["high_confidence_prefixes"]
-        applied_transient_endpoints = exitlag_endpoints
+            relay_endpoints)
+        applied_transient_ips = relay_summary["high_confidence_prefixes"]
+        applied_transient_endpoints = relay_endpoints
 
     payload = {
         "process_name": normalized_process_name,
         "target_processes": target_processes,
+        "relay_processes": relay_processes,
         "pids": pids,
         "summary": summary,
+        "bdo_summary": bdo_summary,
+        "relay_summary": relay_summary,
         "connections": connections,
         "applied_ips": applied_ips,
-        "transient_prefixes": exitlag_summary["high_confidence_prefixes"],
+        "transient_prefixes": relay_summary["high_confidence_prefixes"],
         "applied_transient_ips": applied_transient_ips,
-        "transient_endpoints": exitlag_endpoints,
+        "transient_endpoints": relay_endpoints,
         "applied_transient_endpoints": applied_transient_endpoints,
         "active_exitlag_endpoint": active_exitlag_endpoint,
+        # Backward-compatible aliases kept for existing callers.
+        "exitlag_summary": relay_summary,
+        "exitlag_endpoints": relay_endpoints,
     }
 
     if json_output:
         print(json.dumps(payload), flush=True)
     else:
         print(f"Process: {normalized_process_name}", flush=True)
-        if include_exitlag:
-            print("Including process: ExitLag.exe", flush=True)
+        if relay_processes:
+            print(
+                "Including relay processes: " + ", ".join(relay_processes),
+                flush=True,
+            )
         print(
             f"PIDs: {', '.join(str(pid) for pid in pids) if pids else 'none'}", flush=True)
         print(
@@ -358,13 +392,13 @@ def run(
         if apply_transient:
             if applied_transient_ips:
                 print(
-                    "Transient ExitLag IP prefixes (in-memory): " +
+                    "Transient relay IP prefixes (in-memory): " +
                     ", ".join(applied_transient_ips),
                     flush=True,
                 )
             if applied_transient_endpoints:
                 print(
-                    "Transient ExitLag endpoints (in-memory): " +
+                    "Transient relay endpoints (in-memory): " +
                     ", ".join(applied_transient_endpoints),
                     flush=True,
                 )

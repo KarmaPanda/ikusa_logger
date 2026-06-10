@@ -1,8 +1,14 @@
+"""Analyzer mode for live calibration and offline replay diagnostics.
+
+This module emits structured analyzer rows used by the UI create-config flow,
+tracks duplicate suppression, and supports pcap replay with progress reporting.
+"""
+
 import json
 import os
 import re
 import threading
-import time as _time_module
+from .live_ip_discovery import start_live_ip_discovery_thread
 from collections import deque
 from scapy.all import sniff, get_if_list
 from scapy.arch.windows import get_windows_if_list
@@ -25,6 +31,9 @@ _last_emitted_signature = None
 _recent_emitted_signatures = deque(maxlen=256)
 _last_emitted_second_by_combat = {}
 _last_emitted_second_by_text = {}
+_last_emitted_payload_by_combat = {}
+_last_emitted_payload_by_text = {}
+DUPLICATE_SUPPRESSION_SECONDS = 2
 
 _KNOWN_SERVER_IP_PREFIXES = [
     "20.76.13",
@@ -162,6 +171,8 @@ def package_handler(package, output, ip_filter=True):
     global _recent_emitted_signatures
     global _last_emitted_second_by_combat
     global _last_emitted_second_by_text
+    global _last_emitted_payload_by_combat
+    global _last_emitted_payload_by_text
 
     if "IP" not in package:
         return
@@ -216,6 +227,8 @@ def package_handler(package, output, ip_filter=True):
                 last_payload = payload[-log_length:]
                 return
 
+            identifier_advance = len(selected_match.group(0))
+
             payload = payload[selected_match.start():]
             if len(payload) < log_length:
                 diagnostics.increment("analyze.buffers.incomplete_log")
@@ -239,6 +252,15 @@ def package_handler(package, output, ip_filter=True):
             )
 
             if roles:
+                if core_heuristics.looks_low_quality_roles(
+                    roles,
+                    decoding_strategy=decoding_strategy,
+                ):
+                    diagnostics.increment(
+                        "analyze.records_rejected_low_quality")
+                    position = identifier_advance
+                    continue
+
                 time_value = strftime("%I:%M:%S", localtime(int(package.time)))
                 candidates = core_heuristics.roles_to_emitted_candidates(
                     possible_log,
@@ -252,13 +274,14 @@ def package_handler(package, output, ip_filter=True):
                 if str(decoding_strategy or "").lower() != "latin1" and len(names) < 5:
                     diagnostics.increment(
                         "analyze.records_rejected_low_quality")
-                    position = log_length
+                    position = identifier_advance
                     continue
                 log_body = (
                     f"{roles.get('player_one', '')} "
                     f"{'has killed' if is_kill else 'died to'} "
                     f"{roles.get('player_two', '')} from {roles.get('guild', '')}"
                 )
+                payload_fingerprint = possible_log
                 combat_signature = (
                     bool(is_kill),
                     roles.get("player_one", ""),
@@ -274,12 +297,14 @@ def package_handler(package, output, ip_filter=True):
                 duplicate_within_one_second = (
                     previous_second is not None
                     and event_second is not None
-                    and abs(event_second - previous_second) <= 1
+                    and abs(event_second - previous_second) <= DUPLICATE_SUPPRESSION_SECONDS
+                    and _last_emitted_payload_by_combat.get(combat_signature) == payload_fingerprint
                 )
                 duplicate_text_within_one_second = (
                     previous_text_second is not None
                     and event_second is not None
-                    and abs(event_second - previous_text_second) <= 1
+                    and abs(event_second - previous_text_second) <= DUPLICATE_SUPPRESSION_SECONDS
+                    and _last_emitted_payload_by_text.get(log_body) == payload_fingerprint
                 )
                 if (
                     current_signature == _last_emitted_signature
@@ -289,7 +314,7 @@ def package_handler(package, output, ip_filter=True):
                 ):
                     diagnostics.increment(
                         "analyze.records_suppressed_duplicate")
-                    position = log_length
+                    position = identifier_advance
                     continue
 
                 if not ip_filter:
@@ -309,14 +334,22 @@ def package_handler(package, output, ip_filter=True):
                 if event_second is not None:
                     _last_emitted_second_by_combat[combat_signature] = event_second
                     _last_emitted_second_by_text[log_body] = event_second
+                    _last_emitted_payload_by_combat[combat_signature] = payload_fingerprint
+                    _last_emitted_payload_by_text[log_body] = payload_fingerprint
                     if len(_last_emitted_second_by_combat) > 2048:
                         _last_emitted_second_by_combat.pop(
                             next(iter(_last_emitted_second_by_combat)))
+                    if len(_last_emitted_payload_by_combat) > 2048:
+                        _last_emitted_payload_by_combat.pop(
+                            next(iter(_last_emitted_payload_by_combat)))
                     if len(_last_emitted_second_by_text) > 2048:
                         _last_emitted_second_by_text.pop(
                             next(iter(_last_emitted_second_by_text)))
+                    if len(_last_emitted_payload_by_text) > 2048:
+                        _last_emitted_payload_by_text.pop(
+                            next(iter(_last_emitted_payload_by_text)))
                 diagnostics.increment("analyze.records_emitted")
-                position = log_length
+                position = identifier_advance
             else:
                 position = 2
 
@@ -490,50 +523,8 @@ def list_interfaces(json_output=False):
             print(item.get("label") or item.get("value") or "", flush=True)
 
 
-_EXITLAG_FAST_RETRY_SECONDS = 5
-_EXITLAG_FAST_RETRY_MAX_SECONDS = 90
-_EXITLAG_DISCOVERY_INTERVAL_SECONDS = 30
-
-
-def _run_exitlag_discovery():
-    from . import discover_game
-    try:
-        result = discover_game.run(
-            include_exitlag=True,
-            apply=False,
-            apply_transient=True,
-        )
-        return bool(result.get("transient_prefixes"))
-    except Exception as exc:
-        print(f"ExitLag IP discovery error: {exc}", flush=True)
-        return False
-
-
-def _start_exitlag_discovery_thread():
-    found = _run_exitlag_discovery()
-
-    def _loop():
-        nonlocal found
-        elapsed = 0
-        while not found and elapsed < _EXITLAG_FAST_RETRY_MAX_SECONDS:
-            _time_module.sleep(_EXITLAG_FAST_RETRY_SECONDS)
-            elapsed += _EXITLAG_FAST_RETRY_SECONDS
-            found = _run_exitlag_discovery()
-
-        while True:
-            _time_module.sleep(_EXITLAG_DISCOVERY_INTERVAL_SECONDS)
-            _run_exitlag_discovery()
-
-    thread = threading.Thread(
-        target=_loop,
-        daemon=True,
-        name="exitlag-ip-discovery",
-    )
-    thread.start()
-
-
 def start_sniff(output, all_interfaces=True, ip_filter=True, interface_name=None):
-    _start_exitlag_discovery_thread()
+    start_live_ip_discovery_thread("analyzer-ip-discovery")
     try:
         print("Reading Network...", flush=True)
         win_list = get_windows_if_list()

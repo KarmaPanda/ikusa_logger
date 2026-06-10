@@ -29,11 +29,15 @@
 	let dpr_watch_interval: number | null = null;
 	let viewport_height = 0;
 	let content_height = 0;
+	const dpi_compensation_strength = 0.6;
 
 	$: content_height = viewport_height ? Math.max(0, get_remaining_height(container, 16)) : 0;
 
 	function running_on_windows_desktop() {
-		return running_in_desktop_client() && /windows/i.test(String((window as any).NL_OS ?? navigator.userAgent));
+		return (
+			running_in_desktop_client() &&
+			/windows/i.test(String((window as any).NL_OS ?? navigator.userAgent))
+		);
 	}
 
 	function build_windows_monitor_dpi_command(center_x: number, center_y: number) {
@@ -126,7 +130,9 @@ public static class CopilotMonitorDpi {
 		viewport_height = window.innerHeight;
 		const current_dpr = Number(window.devicePixelRatio || 1);
 		const current_chrome_ratio =
-			window.innerWidth > 0 ? Number(window.outerWidth || window.innerWidth) / window.innerWidth : 1;
+			window.innerWidth > 0
+				? Number(window.outerWidth || window.innerWidth) / window.innerWidth
+				: 1;
 		const current_screen_width = Number(window.screen?.width || 0);
 		const current_screen_height = Number(window.screen?.height || 0);
 
@@ -154,13 +160,14 @@ public static class CopilotMonitorDpi {
 		const scale_y = window.innerHeight / base_window_height;
 		const window_scale = Math.max(0.7, Math.min(1, scale_x, scale_y));
 
-		let dpi_scale = neutralino_dpi_scale ?? current_dpr / base_device_pixel_ratio;
+		let monitor_scale = neutralino_dpi_scale ?? current_dpr;
 
 		// Some Windows/webview combinations do not update devicePixelRatio when
 		// moving across monitors. Fallback to outer/inner chrome ratio as a
 		// monitor-DPI proxy in that case.
 		if (
 			neutralino_dpi_scale == null &&
+			base_device_pixel_ratio > 0 &&
 			Math.abs(current_dpr - base_device_pixel_ratio) < 0.001 &&
 			base_chrome_ratio > 0 &&
 			current_chrome_ratio > 0
@@ -175,17 +182,27 @@ public static class CopilotMonitorDpi {
 
 			const screen_scale =
 				screen_scale_candidates.length > 0
-					? screen_scale_candidates.reduce((sum, value) => sum + value, 0) / screen_scale_candidates.length
+					? screen_scale_candidates.reduce((sum, value) => sum + value, 0) /
+						screen_scale_candidates.length
 					: 1;
 
+			// Treat proxy signals as relative change from startup monitor and
+			// convert to an absolute DPI scale anchored at startup DPR.
 			if (Math.abs(screen_scale - 1) > 0.02) {
-				dpi_scale = screen_scale;
+				monitor_scale = base_device_pixel_ratio * screen_scale;
 			} else {
-				dpi_scale = current_chrome_ratio / base_chrome_ratio;
+				monitor_scale = base_device_pixel_ratio * (current_chrome_ratio / base_chrome_ratio);
 			}
 		}
 
-		dpi_scale = Math.max(0.5, Math.min(2, dpi_scale));
+		monitor_scale = Math.max(0.5, Math.min(2, monitor_scale));
+		const full_dpi_compensation = 1 / monitor_scale;
+		// Blend toward full compensation so high-DPI monitors are moderated
+		// without fully neutralizing OS scale differences.
+		const dpi_scale = Math.max(
+			0.5,
+			Math.min(2, 1 + (full_dpi_compensation - 1) * dpi_compensation_strength)
+		);
 
 		if (Math.abs(dpi_scale - last_applied_dpi_scale) > 0.02) {
 			base_window_width = window.innerWidth;

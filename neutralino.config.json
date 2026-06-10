@@ -1,6 +1,6 @@
 {
   "applicationId": "ikusa.logger",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "defaultMode": "window",
   "documentRoot": "/ui/build/",
   "url": "/",
@@ -17,13 +17,15 @@
     "os.spawnProcess",
     "os.updateSpawnedProcess",
     "os.execCommand",
+    "window.getPosition",
+    "window.getSize",
     "clipboard.writeText",
     "storage.setData",
     "storage.getData"
   ],
   "modes": {
     "window": {
-      "title": "Ikusa Logger x KarmaPanda",
+      "title": "Ikusa+ by KarmaPanda",
       "width": 1200,
       "height": 800,
       "minWidth": 1000,
