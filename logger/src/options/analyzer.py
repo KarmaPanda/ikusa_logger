@@ -271,7 +271,7 @@ def package_handler(package, output, ip_filter=True):
                 )
                 names = [f"{name} {offset}" for name, offset in candidates if isinstance(
                     name, str) and isinstance(offset, int)]
-                if str(decoding_strategy or "").lower() != "latin1" and len(names) < 5:
+                if str(decoding_strategy or "").lower() != "latin1" and len(names) < 3:
                     diagnostics.increment(
                         "analyze.records_rejected_low_quality")
                     position = identifier_advance

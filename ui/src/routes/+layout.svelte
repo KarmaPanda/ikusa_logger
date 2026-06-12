@@ -8,6 +8,7 @@
 	import Header from '../components/header.svelte';
 	import LoadingIndicator from '../svelte-ui/elements/loading-indicator.svelte';
 	import { get_config } from '../components/create-config/config';
+	import { close_debug_tail_window } from '../logic/logger-wrapper';
 
 	let is_ready = false;
 	let base_window_width = 0;
@@ -299,6 +300,7 @@ public static class CopilotMonitorDpi {
 		};
 
 		const handle_window_close = async () => {
+			await close_debug_tail_window();
 			await os.execCommand('taskkill /F /IM logger.exe ');
 			await app.exit();
 		};

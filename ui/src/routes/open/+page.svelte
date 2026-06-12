@@ -21,6 +21,13 @@
 	let pcap_progress_percent = 0;
 	let stopping_replay = false;
 	let has_active_separate_pcap = false;
+	let logger_stdout_buffer = '';
+	let analyzer_line_fragment = '';
+	let replay_raw_line_count = 0;
+	let replay_parse_attempt_count = 0;
+	let replay_parsed_count = 0;
+	let replay_deduped_count = 0;
+	let replay_fragment_join_count = 0;
 	let logger_component: {
 		stop_active_pcap_capture_for_exit?: () => Promise<void>;
 		has_active_pcap_capture?: () => boolean;
@@ -33,33 +40,63 @@
 
 	const logger_callback: LoggerCallback = (data, status) => {
 		if (status === 'running') {
-			if (data.startsWith('PCAP_TOTAL ')) {
-				const total = Number.parseInt(data.replace('PCAP_TOTAL ', '').trim(), 10);
-				if (!Number.isNaN(total) && total >= 0) {
-					pcap_progress_total = total;
-				}
-				return;
-			}
+			logger_stdout_buffer += String(data ?? '');
+			const chunks = logger_stdout_buffer.split(/\r?\n/);
+			logger_stdout_buffer = chunks.pop() ?? '';
 
-			if (data.startsWith('PCAP_PROGRESS ')) {
-				const parts = data.trim().split(/\s+/);
-				if (parts.length >= 2) {
-					const current = Number.parseInt(parts[1], 10);
-					const total = parts.length >= 3 ? Number.parseInt(parts[2], 10) : 0;
-					if (!Number.isNaN(current) && current >= 0) {
-						pcap_progress_current = current;
-					}
+			const lines = chunks.map((line) => line.trim()).filter((line) => line.length > 0);
+			replay_raw_line_count += lines.length;
+
+			for (const line of lines) {
+				if (line.startsWith('PCAP_TOTAL ')) {
+					const total = Number.parseInt(line.replace('PCAP_TOTAL ', '').trim(), 10);
 					if (!Number.isNaN(total) && total >= 0) {
 						pcap_progress_total = total;
 					}
+					continue;
 				}
-				return;
-			}
 
-			const new_log = parse_analyzer_output_line(data);
-			if (new_log) {
+				if (line.startsWith('PCAP_PROGRESS ')) {
+					const parts = line.split(/\s+/);
+					if (parts.length >= 2) {
+						const current = Number.parseInt(parts[1], 10);
+						const total = parts.length >= 3 ? Number.parseInt(parts[2], 10) : 0;
+						if (!Number.isNaN(current) && current >= 0) {
+							pcap_progress_current = current;
+						}
+						if (!Number.isNaN(total) && total >= 0) {
+							pcap_progress_total = total;
+						}
+					}
+					continue;
+				}
+
+				if (/^\d+\spackages\sanalyzed\.$/u.test(line) || line.startsWith('Reading ')) {
+					continue;
+				}
+
+				let candidate_line = line;
+				if (analyzer_line_fragment.length > 0) {
+					candidate_line = analyzer_line_fragment + line;
+					replay_fragment_join_count += 1;
+					analyzer_line_fragment = '';
+				}
+
+				replay_parse_attempt_count += 1;
+				let new_log = parse_analyzer_output_line(candidate_line);
+
+				if (!new_log) {
+					if (candidate_line.includes(',') && candidate_line.split(',').length >= 3) {
+						analyzer_line_fragment = candidate_line;
+					}
+					continue;
+				}
+
+				replay_parsed_count += 1;
+
 				if (logs.find((log) => log.hex === new_log.hex && log.time === new_log.time)) {
-					return;
+					replay_deduped_count += 1;
+					continue;
 				}
 
 				logs.push(new_log);
@@ -67,8 +104,12 @@
 			}
 		} else if (status === ('error' as any)) {
 			console.error(data);
+			logger_stdout_buffer = '';
+			analyzer_line_fragment = '';
 			loading = false;
 		} else if (status === 'terminated') {
+			logger_stdout_buffer = '';
+			analyzer_line_fragment = '';
 			loading = false;
 		}
 	};
@@ -82,8 +123,15 @@
 		logs = [];
 		combat_logs = [];
 		has_active_separate_pcap = false;
+		logger_stdout_buffer = '';
+		analyzer_line_fragment = '';
 		pcap_progress_current = 0;
 		pcap_progress_total = 0;
+		replay_raw_line_count = 0;
+		replay_parse_attempt_count = 0;
+		replay_parsed_count = 0;
+		replay_deduped_count = 0;
+		replay_fragment_join_count = 0;
 		const filePaths = await open_file();
 		if (!filePaths || filePaths.length === 0) return;
 		const config = await get_config();
@@ -191,6 +239,13 @@
 					style={`width:${pcap_progress_total > 0 ? pcap_progress_percent : 0}%`}
 				></div>
 			</div>
+		</div>
+		<div
+			class="w-full rounded-lg border border-gray-700 bg-gray-900/50 px-3 py-2 text-xs text-gray-300"
+		>
+			Replay diagnostics: raw {replay_raw_line_count} | parse attempts {replay_parse_attempt_count} |
+			parsed {replay_parsed_count} | deduped {replay_deduped_count} | fragment-joins {replay_fragment_join_count}
+			| displayed {logs.length}
 		</div>
 	{/if}
 	<div class="flex-1 min-h-0">

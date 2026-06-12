@@ -60,11 +60,6 @@
 
 	let possible_kill_offsets: number[] = [];
 	let kill_index = 0;
-	let kill_offset_manual_override = false;
-
-	const KILL_OFFSET_CONFIDENCE_MIN_COUNT = 12;
-	const KILL_OFFSET_CONFIDENCE_MIN_SHARE = 0.55;
-	const KILL_OFFSET_CONFIDENCE_MIN_LEAD = 1.25;
 
 	let config: Config;
 	let auto_scroll = true;
@@ -74,6 +69,7 @@
 	let show_invalid_logs = false;
 	let show_partial_logs = false;
 	let show_only_partial_logs = false;
+	let auto_revealed_incomplete_logs = false;
 	let invalid_log_count = 0;
 	let partial_log_count = 0;
 	let displayed_logs: LogType[] = [];
@@ -303,10 +299,40 @@
 
 	function logs_changed() {
 		auto_scroll && setTimeout(scroll);
+		auto_reveal_incomplete_logs_if_needed();
 
 		if (logs.length < 50 || logs.length % 100 === 0) {
 			refresh_kill_offsets(logs);
 			void calculate_config();
+		}
+	}
+
+	function auto_reveal_incomplete_logs_if_needed() {
+		if (auto_revealed_incomplete_logs || logs.length === 0) {
+			if (logs.length === 0) {
+				auto_revealed_incomplete_logs = false;
+			}
+			return;
+		}
+
+		let has_complete = false;
+		let has_incomplete = false;
+		for (const log of logs) {
+			const state = get_log_completion_state(log);
+			if (state === 'complete') {
+				has_complete = true;
+				break;
+			}
+			if (state === 'partial' || state === 'invalid') {
+				has_incomplete = true;
+			}
+		}
+
+		if (!has_complete && has_incomplete) {
+			show_partial_logs = true;
+			show_invalid_logs = true;
+			auto_revealed_incomplete_logs = true;
+			show_toast('Showing partial/invalid rows automatically (no complete rows yet).', 'info');
 		}
 	}
 
@@ -319,16 +345,6 @@
 			typeof selected_kill_offset === 'number' && selected_kill_offset > 0
 				? selected_kill_offset
 				: configured_kill_offset;
-		const top_count = recalculated_candidates[0]?.count ?? 0;
-		const second_count = recalculated_candidates[1]?.count ?? 0;
-		const total_votes = recalculated_candidates.reduce((sum, entry) => sum + entry.count, 0);
-		const top_share = total_votes > 0 ? top_count / total_votes : 0;
-		const top_lead =
-			second_count > 0 ? top_count / second_count : top_count > 0 ? Number.POSITIVE_INFINITY : 0;
-		const has_confident_winner =
-			top_count >= KILL_OFFSET_CONFIDENCE_MIN_COUNT &&
-			top_share >= KILL_OFFSET_CONFIDENCE_MIN_SHARE &&
-			top_lead >= KILL_OFFSET_CONFIDENCE_MIN_LEAD;
 
 		if (recalculated_offsets.length === 0) {
 			if (
@@ -339,19 +355,6 @@
 				possible_kill_offsets = [pinned_kill_offset, ...possible_kill_offsets];
 				kill_index = 0;
 			}
-			return;
-		}
-
-		const pinned_missing =
-			typeof pinned_kill_offset === 'number' &&
-			pinned_kill_offset > 0 &&
-			!recalculated_offsets.includes(pinned_kill_offset);
-		const should_hold_pinned_offset =
-			!kill_offset_manual_override && pinned_missing && !has_confident_winner;
-
-		if (should_hold_pinned_offset) {
-			possible_kill_offsets = [pinned_kill_offset, ...recalculated_offsets];
-			kill_index = 0;
 			return;
 		}
 
@@ -1273,14 +1276,6 @@
 							player_two_index = options.player_two_index;
 							guild_index = options.guild_index;
 							kill_index = options.kill_index;
-							const updated_selected_kill_offset = possible_kill_offsets[kill_index];
-							if (
-								typeof updated_selected_kill_offset === 'number' &&
-								updated_selected_kill_offset > 0 &&
-								updated_selected_kill_offset !== previous_selected_kill_offset
-							) {
-								kill_offset_manual_override = true;
-							}
 							config.ips = options.server_ips;
 							config.include_characters = options.include_characters;
 							remap_loaded_logs_from_selected_offsets();

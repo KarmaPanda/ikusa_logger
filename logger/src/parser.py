@@ -356,7 +356,7 @@ def package_handler(package, output, record=False, record_all_tcp=False, ip_filt
                 decoding_strategy=decoding_strategy,
                 max_candidates=5,
             )
-            if len(emitted_candidates) < 5:
+            if len(emitted_candidates) < 3:
                 diagnostics.increment("parser.records_rejected_low_quality")
                 payload = payload[len(selected_match.group(0)):]
                 continue

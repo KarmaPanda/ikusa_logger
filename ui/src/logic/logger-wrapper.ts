@@ -1,6 +1,10 @@
 import { dev } from '$app/environment';
-import { events, os } from '@neutralinojs/lib';
+import { events, os, storage } from '@neutralinojs/lib';
 import { get_project_path, get_runtime_root } from './runtime-path';
+
+const DEV_LOGGER_CONSOLE_KEY = 'ikusa_dev_logger_console_enabled';
+const DEBUG_MIRROR_DIR = 'logger\\.tmp';
+const DEBUG_MIRROR_FILE = 'ui-dev-logger-mirror.log';
 
 function quote_windows_path(path: string) {
 	return `"${path}"`;
@@ -22,6 +26,111 @@ export function quote_logger_argument(value: string) {
 	return quote_windows_path(value.replaceAll('"', '\\"'));
 }
 
+export function get_dev_logger_console_enabled() {
+	return dev_logger_console_enabled_cache;
+}
+
+export function set_dev_logger_console_enabled(enabled: boolean) {
+	dev_logger_console_enabled_cache = Boolean(enabled);
+	storage
+		.setData(DEV_LOGGER_CONSOLE_KEY, dev_logger_console_enabled_cache ? '1' : '0')
+		.catch((error) => console.warn('Failed to persist debug logger mirror setting', error));
+}
+
+let dev_logger_console_enabled_cache = false;
+let dev_logger_console_loaded = false;
+
+export async function load_dev_logger_console_enabled() {
+	if (dev_logger_console_loaded) {
+		return dev_logger_console_enabled_cache;
+	}
+
+	try {
+		const raw = await storage.getData(DEV_LOGGER_CONSOLE_KEY);
+		dev_logger_console_enabled_cache = String(raw ?? '').trim() === '1';
+	} catch (error) {
+		if ((error as { code?: string } | undefined)?.code !== 'NE_ST_NOSTKEX') {
+			console.warn('Failed to load debug logger mirror setting', error);
+		}
+		dev_logger_console_enabled_cache = false;
+	}
+
+	dev_logger_console_loaded = true;
+	return dev_logger_console_enabled_cache;
+}
+
+let debug_tail_window_started = false;
+
+export async function close_debug_tail_window() {
+	try {
+		await os.execCommand('taskkill /F /FI "WINDOWTITLE eq Ikusa Logger Debug Tail"', {
+			background: false,
+			cwd: get_logger_cwd()
+		});
+	} catch {
+		// No matching window is expected when debug tail is not open.
+	} finally {
+		debug_tail_window_started = false;
+	}
+}
+
+function get_debug_mirror_dir_path() {
+	return `${get_logger_cwd()}\\${DEBUG_MIRROR_DIR}`;
+}
+
+function get_debug_mirror_file_path() {
+	return `${get_debug_mirror_dir_path()}\\${DEBUG_MIRROR_FILE}`;
+}
+
+async function ensure_debug_mirror_target() {
+	const mirror_dir = quote_windows_path(get_debug_mirror_dir_path());
+	const mirror_file = quote_windows_path(get_debug_mirror_file_path());
+	const ensure_command = `cmd /c if not exist ${mirror_dir} mkdir ${mirror_dir} & if not exist ${mirror_file} type nul > ${mirror_file}`;
+	await os.execCommand(ensure_command, { background: false, cwd: get_logger_cwd() });
+}
+
+async function append_debug_mirror_run_marker(label: string) {
+	await ensure_debug_mirror_target();
+	const mirror_file = quote_windows_path(get_debug_mirror_file_path());
+	const timestamp = new Date().toISOString();
+	const safe_label = String(label ?? '').replaceAll('"', '');
+	const marker = `[RUN_START ${timestamp}] ${safe_label}`;
+	const marker_command = `cmd /c echo.>>${mirror_file} & echo ${marker}>>${mirror_file}`;
+	await os.execCommand(marker_command, { background: false, cwd: get_logger_cwd() });
+}
+
+async function ensure_debug_tail_window() {
+	if (debug_tail_window_started) {
+		return;
+	}
+
+	// If the app was relaunched (e.g. Dev Mode restart), close any stale tail
+	// window from a previous session before opening a fresh one.
+	await close_debug_tail_window();
+
+	const mirror_file_path = get_debug_mirror_file_path().replaceAll("'", "''");
+	const tail_command = `start "Ikusa Logger Debug Tail" powershell -NoLogo -ExecutionPolicy Bypass -Command "Get-Content -Path '${mirror_file_path}' -Wait"`;
+	await os.execCommand(tail_command, { background: true, cwd: get_logger_cwd() });
+	debug_tail_window_started = true;
+}
+
+async function maybe_mirror_logger_console(command: string) {
+	if (!(await load_dev_logger_console_enabled())) {
+		return;
+	}
+
+	const mirror_file = quote_windows_path(get_debug_mirror_file_path());
+	const mirrored_command = `cmd /c "${command} 1>>${mirror_file} 2>&1"`;
+	try {
+		await ensure_debug_mirror_target();
+		await ensure_debug_tail_window();
+		await os.execCommand(mirrored_command, { background: true, cwd: get_logger_cwd() });
+	} catch (error) {
+		console.warn('Failed to mirror logger command in debug console', error);
+		console.warn('Mirrored command:', mirrored_command);
+	}
+}
+
 function handle_process(evt: CustomEvent) {
 	if (!logger || logger.id !== evt.detail.id) {
 		return;
@@ -30,7 +139,7 @@ function handle_process(evt: CustomEvent) {
 	switch (evt.detail.action) {
 		case 'stdOut':
 			console.log(evt.detail.data.trim());
-			callback?.(evt.detail.data.trim(), 'running');
+			callback?.(String(evt.detail.data ?? ''), 'running');
 			break;
 		case 'stdErr':
 			alert(
@@ -38,7 +147,7 @@ function handle_process(evt: CustomEvent) {
 				evt.detail.data
 			);
 			console.error(evt.detail.data);
-			callback?.(evt.detail.data.trim(), 'error');
+			callback?.(String(evt.detail.data ?? ''), 'error');
 			break;
 		case 'exit':
 			console.log(`Logger process terminated with exit code: ${evt.detail.data}`);
@@ -204,16 +313,19 @@ export async function start_logger(
 	await stop_logger();
 	await run_auto_discovery_before_start(arg);
 
+	if (arg === 'analyze' && (await load_dev_logger_console_enabled())) {
+		await append_debug_mirror_run_marker('analyze replay');
+	}
+
 	const extra_args = data ? ' ' + data : '';
 	const logger_command = get_logger_command();
+	const command = logger_command + ' ' + arg_mapping[arg] + extra_args;
 
-	console.log('Starting logger with command: ' + logger_command + ' ' + arg_mapping[arg] + extra_args);
+	console.log('Starting logger with command: ' + command);
+	await maybe_mirror_logger_console(command);
 
 	events.off('spawnedProcess', handle_process);
-	logger = await os.spawnProcess(
-		logger_command + ' ' + arg_mapping[arg] + extra_args,
-		get_logger_cwd()
-	);
+	logger = await os.spawnProcess(command, get_logger_cwd());
 	start_periodic_auto_discovery(arg);
 	callback = clb;
 	events.on('spawnedProcess', handle_process);
@@ -222,6 +334,7 @@ export async function start_logger(
 export async function spawn_parallel_logger(data: string) {
 	const logger_command = get_logger_command();
 	const command = `${logger_command} ${data}`;
+	await maybe_mirror_logger_console(command);
 	return await os.spawnProcess(command, get_logger_cwd());
 }
 
@@ -233,6 +346,7 @@ export async function stop_spawned_logger(process_id: number | string) {
 export async function probe_logger_command(data: string): Promise<{ stdOut: string; stdErr: string; exitCode: number }> {
 	const logger_command = get_logger_command();
 	const command = `${logger_command} ${data}`;
+	await maybe_mirror_logger_console(command);
 	const result = await os.execCommand(command, { background: false, cwd: get_logger_cwd() });
 	return result as { stdOut: string; stdErr: string; exitCode: number };
 }
@@ -242,6 +356,7 @@ export async function run_logger_command(data?: string): Promise<{ stdOut: strin
 
 	const logger_command = get_logger_command();
 	const command = data ? `${logger_command} ${data}` : logger_command;
+	await maybe_mirror_logger_console(command);
 
 	return await new Promise<{ stdOut: string; stdErr: string; exitCode: number }>(
 		async (resolve, reject) => {

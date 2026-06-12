@@ -594,6 +594,47 @@ def _is_latin1_name(name):
     return has_letter
 
 
+def _looks_suspicious_latin1_name(name):
+    """Detect latin1 token-like noise that should not pass combat-role gating."""
+    if not isinstance(name, str):
+        return True
+
+    value = name.strip()
+    if not value:
+        return True
+
+    # Reject long repeated-character runs (for example: ccccccncccc...).
+    max_run = 1
+    current_run = 1
+    previous = ""
+    for ch in value:
+        if ch == previous:
+            current_run += 1
+            if current_run > max_run:
+                max_run = current_run
+        else:
+            current_run = 1
+            previous = ch
+
+    if max_run >= 6:
+        return True
+
+    # Reject URL/token-like identifiers frequently seen in non-combat payloads.
+    if len(value) >= 20:
+        separator_count = value.count("_") + value.count("-")
+        if separator_count >= 2:
+            return True
+
+    # Long latin1 names without vowels are usually decode garbage.
+    if len(value) >= 12:
+        lowered = value.lower()
+        vowel_count = sum(1 for ch in lowered if ch in "aeiou")
+        if vowel_count == 0:
+            return True
+
+    return False
+
+
 def _looks_like_shifted_duplicate(name_a, name_b):
     """Detect one-character shift variants from boundary misalignment."""
     if not isinstance(name_a, str) or not isinstance(name_b, str):
@@ -697,6 +738,11 @@ def looks_low_quality_roles(roles, decoding_strategy=None):
         # Keep records when at least 2 core slots look like plausible latin1
         # names; this avoids over-dropping valid packets with one noisy slot.
         if valid_count < 2:
+            return True
+
+        # Drop tokenized/non-combat noise when both player slots look suspicious
+        # even if they technically satisfy latin1 character rules.
+        if _looks_suspicious_latin1_name(role_names["player_one"]) and _looks_suspicious_latin1_name(role_names["player_two"]):
             return True
 
     return False

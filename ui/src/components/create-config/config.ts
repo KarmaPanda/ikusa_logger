@@ -593,7 +593,15 @@ export async function update_config(config: Config) {
 }
 
 export async function get_config(): Promise<Config> {
-	const stored_config_raw = await storage.getData('config').catch((e) => console.error(e));
+	const stored_config_raw = await storage.getData('config').catch((e) => {
+		if ((e as { code?: string } | undefined)?.code === 'NE_ST_NOSTKEX') {
+			// First run: no config key exists in Neutralino storage yet.
+			return null;
+		}
+
+		console.error(e);
+		return null;
+	});
 	const file_config = await read_config_file();
 	const stored_config = stored_config_raw ? (JSON.parse(stored_config_raw) as Partial<Config>) : null;
 	const normalized = normalize_config({

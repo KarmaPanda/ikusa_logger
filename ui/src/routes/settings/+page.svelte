@@ -7,7 +7,13 @@
 	import { app, os } from '@neutralinojs/lib';
 	import { dev } from '$app/environment';
 	import { get_main_executable_command } from '../../logic/app-command';
-	import { run_logger_command, quote_logger_argument } from '../../logic/logger-wrapper';
+	import {
+		run_logger_command,
+		quote_logger_argument,
+		get_dev_logger_console_enabled,
+		set_dev_logger_console_enabled,
+		load_dev_logger_console_enabled
+	} from '../../logic/logger-wrapper';
 
 	let config: Config;
 
@@ -27,6 +33,7 @@
 
 	let ip_filter = true;
 	let diagnostics_enabled = true;
+	let dev_logger_console_enabled = false;
 	let available_discovery_processes: string[] = [];
 	let selected_discovery_process_index = 0;
 	let selected_ui_scale = 1;
@@ -154,6 +161,10 @@
 		}
 	}
 
+	function update_dev_logger_console_enabled() {
+		set_dev_logger_console_enabled(dev_logger_console_enabled);
+	}
+
 	function parse_discovery_processes_output(raw_output: string): string[] {
 		const lines = raw_output
 			.split(/\r?\n/)
@@ -249,6 +260,7 @@
 
 	onMount(async () => {
 		config = await get_config();
+		dev_logger_console_enabled = await load_dev_logger_console_enabled();
 		await load_interfaces();
 		await load_discovery_processes();
 		if (config.all_interfaces === true || config.all_interfaces === undefined) {
@@ -261,12 +273,18 @@
 		}
 		ip_filter = config.ip_filter === true || config.ip_filter === undefined ? true : false;
 		diagnostics_enabled = config.diagnostics_enabled === true;
+		dev_logger_console_enabled = get_dev_logger_console_enabled();
 		selected_ui_scale = Math.max(
 			0,
 			ui_scale_values.findIndex((value) => value === config.ui_scale)
 		);
 		settings_loaded = true;
 	});
+
+	$: if (settings_loaded) {
+		dev_logger_console_enabled;
+		update_dev_logger_console_enabled();
+	}
 
 	async function restart_dev() {
 		if (dev) return;
@@ -332,6 +350,24 @@
 					id="diagnostics-toggle"
 					type="checkbox"
 					bind:checked={diagnostics_enabled}
+					class="h-5 w-5 rounded border border-foreground-secondary bg-background text-gold-300"
+				/>
+			</label>
+		</div>
+		<div class="w-full">
+			<label for="dev-logger-console-toggle" class="block mb-1 text-sm text-foreground"
+				>Debug: Mirror Logger in Console</label
+			>
+			<label
+				class="w-full flex items-center justify-between rounded-lg border border-foreground-secondary/40 px-3 py-2"
+			>
+				<span class="text-sm text-foreground-secondary"
+					>Open a separate cmd window for each logger command</span
+				>
+				<input
+					id="dev-logger-console-toggle"
+					type="checkbox"
+					bind:checked={dev_logger_console_enabled}
 					class="h-5 w-5 rounded border border-foreground-secondary bg-background text-gold-300"
 				/>
 			</label>
